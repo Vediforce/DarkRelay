@@ -1,6 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::channel::ChannelType;
+use crate::permissions::Role;
+
 pub type UserId = u64;
 pub type ChannelId = u64;
 pub type MessageId = u64;
@@ -29,6 +32,8 @@ pub struct ChannelInfo {
     pub id: ChannelId,
     pub name: String,
     pub is_public: bool,
+    pub channel_type: ChannelType,
+    pub user_role: Option<Role>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +49,31 @@ pub struct ChatMessage {
 
     /// Extensible map for future phases (encryption headers, routing hints, etc.).
     pub metadata: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BanInfo {
+    pub user_id: UserId,
+    pub username: String,
+    pub banned_until: Option<DateTime<Utc>>,
+    pub banned_by: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminInfo {
+    pub user_id: UserId,
+    pub username: String,
+    pub role: Role,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogEntry {
+    pub timestamp: DateTime<Utc>,
+    pub user_id: UserId,
+    pub username: String,
+    pub action: String,
+    pub target: String,
+    pub details: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +132,73 @@ pub enum ClientMessage {
         meta: MessageMeta,
         channel: String,
         limit: u16,
+    },
+
+    DeleteMessage {
+        meta: MessageMeta,
+        channel: String,
+        message_id: MessageId,
+    },
+
+    PromoteUser {
+        meta: MessageMeta,
+        channel: String,
+        username: String,
+        role: Role,
+    },
+
+    DemoteUser {
+        meta: MessageMeta,
+        channel: String,
+        username: String,
+    },
+
+    BanUser {
+        meta: MessageMeta,
+        channel: String,
+        username: String,
+        duration_seconds: Option<u64>,
+        reason: Option<String>,
+    },
+
+    UnbanUser {
+        meta: MessageMeta,
+        channel: String,
+        username: String,
+    },
+
+    KickUser {
+        meta: MessageMeta,
+        channel: String,
+        username: String,
+        reason: Option<String>,
+    },
+
+    ListAdmins {
+        meta: MessageMeta,
+        channel: String,
+    },
+
+    ListBans {
+        meta: MessageMeta,
+        channel: String,
+    },
+
+    ViewLogs {
+        meta: MessageMeta,
+        channel: String,
+        limit: u32,
+    },
+
+    ChangeChannelType {
+        meta: MessageMeta,
+        channel: String,
+        channel_type: ChannelType,
+    },
+
+    DeleteChannel {
+        meta: MessageMeta,
+        channel: String,
     },
 
     Disconnect {
@@ -183,5 +280,91 @@ pub enum ServerMessage {
     ProtocolError {
         meta: MessageMeta,
         text: String,
+    },
+
+    MessageDeleted {
+        meta: MessageMeta,
+        channel: String,
+        message_id: MessageId,
+        deleted_by: String,
+    },
+
+    UserPromoted {
+        meta: MessageMeta,
+        channel: String,
+        user_id: UserId,
+        username: String,
+        new_role: Role,
+        promoted_by: String,
+    },
+
+    UserDemoted {
+        meta: MessageMeta,
+        channel: String,
+        user_id: UserId,
+        username: String,
+        demoted_by: String,
+    },
+
+    UserBanned {
+        meta: MessageMeta,
+        channel: String,
+        user_id: UserId,
+        username: String,
+        banned_until: Option<DateTime<Utc>>,
+        banned_by: String,
+        reason: Option<String>,
+    },
+
+    UserUnbanned {
+        meta: MessageMeta,
+        channel: String,
+        username: String,
+        unbanned_by: String,
+    },
+
+    UserKicked {
+        meta: MessageMeta,
+        channel: String,
+        user_id: UserId,
+        username: String,
+        kicked_by: String,
+        reason: Option<String>,
+    },
+
+    AdminList {
+        meta: MessageMeta,
+        channel: String,
+        admins: Vec<AdminInfo>,
+    },
+
+    BanList {
+        meta: MessageMeta,
+        channel: String,
+        bans: Vec<BanInfo>,
+    },
+
+    LogList {
+        meta: MessageMeta,
+        channel: String,
+        logs: Vec<LogEntry>,
+    },
+
+    ChannelTypeChanged {
+        meta: MessageMeta,
+        channel: String,
+        new_type: ChannelType,
+        changed_by: String,
+    },
+
+    ChannelDeleted {
+        meta: MessageMeta,
+        channel: String,
+        deleted_by: String,
+    },
+
+    AdminError {
+        meta: MessageMeta,
+        reason: String,
     },
 }

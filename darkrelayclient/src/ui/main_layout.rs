@@ -233,6 +233,61 @@ fn handle_server_message(
         ServerMessage::ProtocolError { text, .. } => {
             toast(terminal, &text, ToastKind::Error)?;
         }
+        ServerMessage::MessageDeleted { channel, message_id, deleted_by, .. } => {
+            state.remove_message(&channel, message_id);
+            toast(terminal, &format!("Message deleted by {}", deleted_by), ToastKind::Info)?;
+        }
+        ServerMessage::UserPromoted { channel, username, new_role, promoted_by, .. } => {
+            toast(terminal, &format!("{} promoted to {:?} by {} in #{}", username, new_role, promoted_by, channel), ToastKind::Info)?;
+        }
+        ServerMessage::UserDemoted { channel, username, demoted_by, .. } => {
+            toast(terminal, &format!("{} demoted to User by {} in #{}", username, demoted_by, channel), ToastKind::Info)?;
+        }
+        ServerMessage::UserBanned { channel, username, banned_by, reason, .. } => {
+            let reason_text = reason.unwrap_or_default();
+            toast(terminal, &format!("{} banned from #{} by {}: {}", username, channel, banned_by, reason_text), ToastKind::Info)?;
+        }
+        ServerMessage::UserUnbanned { channel, username, unbanned_by, .. } => {
+            toast(terminal, &format!("{} unbanned from #{} by {}", username, channel, unbanned_by), ToastKind::Info)?;
+        }
+        ServerMessage::UserKicked { channel, username, kicked_by, reason, .. } => {
+            let reason_text = reason.unwrap_or_default();
+            toast(terminal, &format!("{} kicked from #{} by {}: {}", username, channel, kicked_by, reason_text), ToastKind::Info)?;
+        }
+        ServerMessage::AdminList { admins, .. } => {
+            let admin_names: Vec<_> = admins.iter().map(|a| format!("{} ({:?})", a.username, a.role)).collect();
+            toast(terminal, &format!("Admins: {}", admin_names.join(", ")), ToastKind::Info)?;
+        }
+        ServerMessage::BanList { bans, .. } => {
+            if bans.is_empty() {
+                toast(terminal, "No bans in this channel", ToastKind::Info)?;
+            } else {
+                let ban_info: Vec<_> = bans.iter().map(|b| {
+                    match b.banned_until {
+                        Some(until) => format!("{} (until {})", b.username, until.format("%Y-%m-%d %H:%M")),
+                        None => format!("{} (permanent)", b.username),
+                    }
+                }).collect();
+                toast(terminal, &format!("Bans: {}", ban_info.join(", ")), ToastKind::Info)?;
+            }
+        }
+        ServerMessage::LogList { logs, .. } => {
+            for log in logs.iter().take(5) {
+                toast(terminal, &format!("[{}] {} by {}: {}", log.timestamp.format("%H:%M:%S"), log.action, log.username, log.details), ToastKind::Info)?;
+            }
+        }
+        ServerMessage::ChannelTypeChanged { channel, new_type, changed_by, .. } => {
+            toast(terminal, &format!("#{} channel type changed to {:?} by {}", channel, new_type, changed_by), ToastKind::Info)?;
+        }
+        ServerMessage::ChannelDeleted { channel, deleted_by, .. } => {
+            toast(terminal, &format!("Channel #{} deleted by {}", channel, deleted_by), ToastKind::Error)?;
+            if state.current_channel.as_deref() == Some(channel.as_str()) {
+                state.current_channel = None;
+            }
+        }
+        ServerMessage::AdminError { reason, .. } => {
+            toast(terminal, &format!("Admin error: {}", reason), ToastKind::Error)?;
+        }
         ServerMessage::AuthChallenge { .. }
         | ServerMessage::AuthSuccess { .. }
         | ServerMessage::AuthFailure { .. }

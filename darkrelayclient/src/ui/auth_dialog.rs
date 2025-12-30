@@ -32,7 +32,7 @@ enum Field {
     Buttons,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Button {
     Login,
     Register,

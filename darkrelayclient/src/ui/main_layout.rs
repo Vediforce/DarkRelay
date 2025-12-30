@@ -80,9 +80,10 @@ pub async fn run(
                             }
                         }
                         Focus::Channels => {
-                            if let Some(ch) = state.channels.get(selected_channel_idx) {
+                            if let Some(ch) = state.channels.get(selected_channel_idx).cloned() {
+                                let meta = state.next_meta();
                                 conn.send(ClientMessage::JoinChannel {
-                                    meta: state.next_meta(),
+                                    meta,
                                     name: ch.name.clone(),
                                     password: None,
                                 })?;
@@ -131,11 +132,20 @@ fn handle_input_line(
         return Ok(());
     };
 
+    // Encrypt the message if ECDH is complete
+    let (content, metadata) = if state.crypto.is_ready() {
+        let (ciphertext, nonce) = state.crypto.encrypt(line.as_bytes(), Some(&channel))?;
+        let nonce_hex = hex::encode(&nonce);
+        (ciphertext, vec![("nonce".to_string(), nonce_hex)])
+    } else {
+        (line.as_bytes().to_vec(), Vec::new())
+    };
+
     conn.send(ClientMessage::SendMessage {
         meta: state.next_meta(),
         channel,
-        content: line.as_bytes().to_vec(),
-        metadata: Vec::new(),
+        content,
+        metadata,
     })?;
 
     Ok(())
@@ -225,7 +235,8 @@ fn handle_server_message(
         }
         ServerMessage::AuthChallenge { .. }
         | ServerMessage::AuthSuccess { .. }
-        | ServerMessage::AuthFailure { .. } => {
+        | ServerMessage::AuthFailure { .. }
+        | ServerMessage::EcdhAck { .. } => {
             // handled earlier
         }
     }
@@ -250,8 +261,15 @@ fn draw(
     let info_w = 22usize.min(cols_usize.saturating_sub(channels_w + 1));
     let messages_w = cols_usize.saturating_sub(channels_w + info_w + 2);
 
+    let encryption_indicator = if state.crypto.is_ready() {
+        "🔒"
+    } else {
+        ""
+    };
+    
     let header = format!(
-        "DarkRelay | Connected: {} @ {}",
+        "DarkRelay {} | Connected: {} @ {}",
+        encryption_indicator,
         state
             .user
             .as_ref()
@@ -339,8 +357,18 @@ fn draw(
     for (i, m) in msgs.iter().skip(start).enumerate() {
         let y = 3 + i;
         let ts = m.timestamp.with_timezone(&Local).format("%H:%M:%S");
-        let content = String::from_utf8_lossy(&m.content);
-        let line = format!("[{}] <{}>: {}", ts, m.username, content);
+        
+        // Try to decrypt the message if nonce is present
+        let content_str = if let Some(ref nonce) = m.nonce {
+            match state.crypto.decrypt(&m.content, nonce, state.current_channel.as_deref()) {
+                Ok(plaintext) => String::from_utf8_lossy(&plaintext).to_string(),
+                Err(_) => "[decryption failed]".to_string(),
+            }
+        } else {
+            String::from_utf8_lossy(&m.content).to_string()
+        };
+        
+        let line = format!("[{}] <{}>: {}", ts, m.username, content_str);
 
         let is_self = state.user.as_ref().map(|u| u.id) == Some(m.user_id);
         let styled = if is_self {

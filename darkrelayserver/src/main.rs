@@ -2,6 +2,8 @@ mod auth;
 mod channel;
 mod handler;
 mod registry;
+mod tls;
+mod crypto;
 
 use std::{
     env,
@@ -17,15 +19,17 @@ use tokio::{
     net::TcpListener,
     sync::{broadcast, RwLock},
 };
+use tokio_rustls::TlsAcceptor;
 use tracing::{error, info};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-use crate::{auth::AuthService, channel::ChannelManager, registry::Registry};
+use crate::{auth::AuthService, channel::ChannelManager, registry::Registry, crypto::EcdhManager};
 
 pub struct AppState {
     pub auth: RwLock<AuthService>,
     pub channels: RwLock<ChannelManager>,
     pub registry: RwLock<Registry>,
+    pub ecdh: RwLock<EcdhManager>,
 
     pub special_key: String,
 
@@ -39,6 +43,7 @@ impl AppState {
             auth: RwLock::new(AuthService::new()),
             channels: RwLock::new(ChannelManager::new()),
             registry: RwLock::new(Registry::new()),
+            ecdh: RwLock::new(EcdhManager::new()),
             special_key,
             next_client_id: AtomicU64::new(1),
             next_server_msg_id: AtomicU64::new(1),
@@ -92,11 +97,14 @@ async fn main() {
         channels.ensure_channel("general", true, None);
     }
 
+    let tls_config = tls::load_or_generate_tls_config(None, None).expect("load TLS config");
+    let tls_acceptor = TlsAcceptor::from(tls_config);
+
     let listener = TcpListener::bind("0.0.0.0:8080")
         .await
         .expect("bind to 0.0.0.0:8080");
 
-    info!(addr = "0.0.0.0:8080", "darkrelay server started");
+    info!(addr = "0.0.0.0:8080", tls = true, "darkrelay server started");
 
     let (shutdown_tx, _) = broadcast::channel::<()>(16);
     let mut shutdown_rx = shutdown_tx.subscribe();
@@ -118,10 +126,19 @@ async fn main() {
                         info!(client_id, %peer_addr, "client connected");
 
                         let state = Arc::clone(&state);
+                        let tls_acceptor = tls_acceptor.clone();
                         let mut shutdown_rx = shutdown_tx.subscribe();
 
                         tokio::spawn(async move {
-                            if let Err(e) = handler::handle_client(state, client_id, socket, &mut shutdown_rx).await {
+                            let tls_stream = match tls_acceptor.accept(socket).await {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    error!(client_id, error = %e, "TLS handshake failed");
+                                    return;
+                                }
+                            };
+
+                            if let Err(e) = handler::handle_client(state, client_id, tls_stream, &mut shutdown_rx).await {
                                 error!(client_id, error = %e, "client handler error");
                             }
                         });

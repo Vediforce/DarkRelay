@@ -12,10 +12,10 @@ use darkrelayprotocol::protocol::{
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::TcpStream,
     sync::{broadcast, mpsc},
     time,
 };
+use tokio_rustls::server::TlsStream;
 use tracing::{debug, info, warn};
 
 use crate::{AppState, channel::ClientId};
@@ -23,10 +23,10 @@ use crate::{AppState, channel::ClientId};
 pub async fn handle_client(
     state: Arc<AppState>,
     client_id: ClientId,
-    socket: TcpStream,
+    socket: TlsStream<tokio::net::TcpStream>,
     shutdown_rx: &mut broadcast::Receiver<()>,
 ) -> io::Result<()> {
-    let (mut reader, mut writer) = socket.into_split();
+    let (mut reader, mut writer) = tokio::io::split(socket);
 
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<ServerMessage>();
 
@@ -58,6 +58,7 @@ pub async fn handle_client(
 
     let mut special_authed = false;
     let mut user_authed = false;
+    let mut ecdh_complete = false;
 
     loop {
         tokio::select! {
@@ -92,9 +93,37 @@ pub async fn handle_client(
                         }
 
                         special_authed = true;
-                        let sys = ServerMessage::SystemMessage { meta: server_meta(&state), text: "special key accepted; please login or register".to_string() };
+                        let sys = ServerMessage::SystemMessage { meta: server_meta(&state), text: "special key accepted; send ECDH public key".to_string() };
                         let reg = state.registry.read().await;
                         reg.send(client_id, sys);
+                    }
+
+                    ClientMessage::EcdhPublicKey { public_key, .. } => {
+                        if !special_authed {
+                            send_protocol_error(&state, client_id, "special auth required").await;
+                            continue;
+                        }
+
+                        let server_public_key = {
+                            let mut ecdh = state.ecdh.write().await;
+                            ecdh.generate_keypair(client_id, &public_key)
+                        };
+
+                        match server_public_key {
+                            Ok(pub_key) => {
+                                ecdh_complete = true;
+                                let ack = ServerMessage::EcdhAck { meta: server_meta(&state), public_key: pub_key };
+                                let reg = state.registry.read().await;
+                                reg.send(client_id, ack);
+
+                                let sys = ServerMessage::SystemMessage { meta: server_meta(&state), text: "encryption enabled; please login or register".to_string() };
+                                let reg = state.registry.read().await;
+                                reg.send(client_id, sys);
+                            }
+                            Err(reason) => {
+                                send_protocol_error(&state, client_id, &reason).await;
+                            }
+                        }
                     }
 
                     ClientMessage::RegisterUser { username, .. } => {
@@ -253,12 +282,28 @@ pub async fn handle_client(
                             continue;
                         }
 
+                        // Extract nonce from metadata if present
+                        let nonce = metadata.iter()
+                            .find(|(k, _)| k == "nonce")
+                            .and_then(|(_, v)| hex::decode(v).ok());
+
+                        // Server stores encrypted content as-is, never attempts to decrypt
+                        info!(
+                            client_id,
+                            user = user.username,
+                            channel = &channel,
+                            size = content.len(),
+                            encrypted = ecdh_complete,
+                            "message received (content encrypted, not logged)"
+                        );
+
                         let msg = ChatMessage {
                             id: 0,
                             user_id: user.id,
                             username: user.username.clone(),
                             content,
                             timestamp: Utc::now(),
+                            nonce,
                             metadata,
                         };
 
@@ -322,6 +367,11 @@ async fn cleanup_disconnect(state: &Arc<AppState>, client_id: ClientId) {
         if let Some(user) = user {
             broadcast_user_left(state, client_id, ch, user).await;
         }
+    }
+
+    {
+        let mut ecdh = state.ecdh.write().await;
+        ecdh.remove(client_id);
     }
 
     let mut reg = state.registry.write().await;

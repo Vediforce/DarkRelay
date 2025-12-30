@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use darkrelayprotocol::protocol::{ChannelInfo, ChatMessage, MessageMeta, UserInfo};
+use crate::crypto::CryptoState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {
@@ -9,7 +10,6 @@ pub enum AuthMode {
     Register,
 }
 
-#[derive(Default)]
 pub struct ClientState {
     pub server_addr: String,
     pub user: Option<UserInfo>,
@@ -19,6 +19,8 @@ pub struct ClientState {
     pub current_channel: Option<String>,
 
     pub messages_by_channel: HashMap<String, Vec<ChatMessage>>,
+
+    pub crypto: CryptoState,
 
     next_msg_id: u64,
 }
@@ -32,6 +34,7 @@ impl ClientState {
             channels: Vec::new(),
             current_channel: None,
             messages_by_channel: HashMap::new(),
+            crypto: CryptoState::new(),
             next_msg_id: 1,
         }
     }
@@ -42,6 +45,7 @@ impl ClientState {
         self.channels.clear();
         self.current_channel = None;
         self.messages_by_channel.clear();
+        self.crypto.reset();
         self.next_msg_id = 1;
     }
 

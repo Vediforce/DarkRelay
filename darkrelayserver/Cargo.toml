@@ -1,0 +1,19 @@
+[package]
+name = "darkrelayserver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+darkrelayprotocol = { path = "../darkrelayprotocol" }
+
+serde.workspace = true
+bincode.workspace = true
+chrono.workspace = true
+
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+tokio.workspace = true
+
+argon2 = { version = "0.5", features = ["std"] }

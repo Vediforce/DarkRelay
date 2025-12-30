@@ -1,0 +1,10 @@
+/target
+**/target
+**/*.rs.bk
+
+# Logs
+**/logs/*.log
+**/logs/*.json
+
+# OS
+.DS_Store

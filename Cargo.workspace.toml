@@ -1,0 +1,10 @@
+# This file mirrors the workspace definition in Cargo.toml.
+# Cargo uses Cargo.toml as the actual workspace manifest.
+
+[workspace]
+resolver = "2"
+members = [
+  "darkrelayprotocol",
+  "darkrelayserver",
+  "darkrelayclient",
+]

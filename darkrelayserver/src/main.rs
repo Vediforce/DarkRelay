@@ -6,6 +6,8 @@ mod tls;
 mod crypto;
 mod admin;
 mod ban_manager;
+mod dm_manager;
+mod file_transfer;
 
 use std::{
     env,
@@ -31,6 +33,8 @@ use crate::{
     ban_manager::BanManager,
     channel::ChannelManager,
     crypto::EcdhManager,
+    dm_manager::DMManager,
+    file_transfer::FileTransferManager,
     registry::Registry,
 };
 
@@ -41,6 +45,8 @@ pub struct AppState {
     pub ecdh: RwLock<EcdhManager>,
     pub admin: RwLock<AdminManager>,
     pub bans: RwLock<BanManager>,
+    pub dm_manager: RwLock<DMManager>,
+    pub file_transfer: RwLock<FileTransferManager>,
 
     pub special_key: String,
 
@@ -57,6 +63,8 @@ impl AppState {
             ecdh: RwLock::new(EcdhManager::new()),
             admin: RwLock::new(AdminManager::new()),
             bans: RwLock::new(BanManager::new()),
+            dm_manager: RwLock::new(DMManager::new()),
+            file_transfer: RwLock::new(FileTransferManager::new()),
             special_key,
             next_client_id: AtomicU64::new(1),
             next_server_msg_id: AtomicU64::new(1),

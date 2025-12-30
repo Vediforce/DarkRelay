@@ -39,6 +39,9 @@ pub struct ChatMessage {
     pub content: Vec<u8>,
     pub timestamp: DateTime<Utc>,
 
+    /// Nonce used for AES-GCM encryption (12 bytes).
+    pub nonce: Option<Vec<u8>>,
+
     /// Extensible map for future phases (encryption headers, routing hints, etc.).
     pub metadata: Vec<(String, String)>,
 }
@@ -55,6 +58,12 @@ pub enum ClientMessage {
     Auth {
         meta: MessageMeta,
         key: String,
+    },
+
+    /// ECDH key exchange (Phase 2): client sends its public key.
+    EcdhPublicKey {
+        meta: MessageMeta,
+        public_key: Vec<u8>,
     },
 
     RegisterUser {
@@ -118,6 +127,12 @@ pub enum ServerMessage {
     AuthFailure {
         meta: MessageMeta,
         reason: String,
+    },
+
+    /// ECDH acknowledgment (Phase 2): server sends its public key.
+    EcdhAck {
+        meta: MessageMeta,
+        public_key: Vec<u8>,
     },
 
     ChannelList {

@@ -1,6 +1,7 @@
 mod connection;
 mod state;
 mod ui;
+mod crypto;
 
 use std::{
     env,
@@ -56,26 +57,34 @@ async fn main() -> io::Result<()> {
             continue;
         }
 
+        if let Err(e) = handshake_ecdh(&mut terminal, &mut state, &mut conn).await {
+            error!(error = %e, "ECDH handshake failed");
+            ui::show_error_dialog(&mut terminal, &format!("Encryption setup failed: {e}"))?;
+            continue;
+        }
+
         let auth_res = match dialog.mode {
             AuthMode::Register => {
+                let meta = state.next_meta();
                 authenticate_with_spinner(
                     &mut terminal,
                     &mut state,
                     &mut conn,
                     ClientMessage::RegisterUser {
-                        meta: state.next_meta(),
+                        meta,
                         username: dialog.username,
                     },
                 )
                 .await
             }
             AuthMode::Login => {
+                let meta = state.next_meta();
                 authenticate_with_spinner(
                     &mut terminal,
                     &mut state,
                     &mut conn,
                     ClientMessage::Login {
-                        meta: state.next_meta(),
+                        meta,
                         username: dialog.username,
                         password: dialog.password,
                     },
@@ -146,6 +155,48 @@ async fn handshake_special_key(
     Ok(())
 }
 
+async fn handshake_ecdh(
+    terminal: &mut ui::TerminalSession,
+    state: &mut ClientState,
+    conn: &mut Connection,
+) -> io::Result<()> {
+    let handshake = crypto::EcdhHandshake::new();
+    
+    conn.send(ClientMessage::EcdhPublicKey {
+        meta: state.next_meta(),
+        public_key: handshake.public_key().to_vec(),
+    })?;
+
+    let resp = tokio::time::timeout(Duration::from_secs(5), conn.recv())
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "ECDH response timeout"))??;
+
+    match resp {
+        Some(ServerMessage::EcdhAck { public_key, .. }) => {
+            let shared_secret = handshake.complete(&public_key)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            
+            // Store the shared secret in crypto state
+            state.crypto.ecdh_secret = Some(shared_secret);
+            
+            ui::toast(terminal, "🔒 Encryption enabled", ui::ToastKind::Info)?;
+            Ok(())
+        }
+        Some(ServerMessage::ProtocolError { text, .. }) => {
+            Err(io::Error::new(io::ErrorKind::Other, text))
+        }
+        Some(other) => {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("expected EcdhAck, got {:?}", other),
+            ))
+        }
+        None => {
+            Err(io::Error::new(io::ErrorKind::UnexpectedEof, "server closed"))
+        }
+    }
+}
+
 async fn authenticate_with_spinner(
     terminal: &mut ui::TerminalSession,
     state: &mut ClientState,
@@ -162,7 +213,7 @@ async fn authenticate_with_spinner(
         idx += 1;
 
         match tokio::time::timeout(Duration::from_millis(120), conn.recv()).await {
-            Ok(Some(ServerMessage::AuthSuccess { user, generated_password, .. })) => {
+            Ok(Ok(Some(ServerMessage::AuthSuccess { user, generated_password, .. }))) => {
                 state.user = Some(user);
                 if let Some(pw) = generated_password {
                     state.generated_password = Some(pw.clone());
@@ -170,18 +221,21 @@ async fn authenticate_with_spinner(
                 }
                 return Ok(());
             }
-            Ok(Some(ServerMessage::AuthFailure { reason, .. })) => {
+            Ok(Ok(Some(ServerMessage::AuthFailure { reason, .. }))) => {
                 return Err(io::Error::new(io::ErrorKind::PermissionDenied, reason));
             }
-            Ok(Some(other)) => {
+            Ok(Ok(Some(other))) => {
                 // Ignore noise and keep waiting.
                 tracing::debug!(?other, "auth waiting");
             }
-            Ok(None) => {
+            Ok(Ok(None)) => {
                 return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "server closed"));
             }
+            Ok(Err(e)) => {
+                return Err(e);
+            }
             Err(_) => {
-                // tick spinner
+                // tick spinner (timeout)
             }
         }
     }

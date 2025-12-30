@@ -17,3 +17,12 @@ tracing-subscriber.workspace = true
 tokio.workspace = true
 
 argon2 = { version = "0.5", features = ["std"] }
+
+rustls.workspace = true
+tokio-rustls.workspace = true
+x25519-dalek.workspace = true
+aes-gcm.workspace = true
+rand.workspace = true
+rcgen.workspace = true
+rustls-pemfile = "1.0"
+hex = "0.4"

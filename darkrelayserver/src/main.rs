@@ -4,6 +4,8 @@ mod handler;
 mod registry;
 mod tls;
 mod crypto;
+mod admin;
+mod ban_manager;
 
 use std::{
     env,
@@ -23,13 +25,22 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{error, info};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-use crate::{auth::AuthService, channel::ChannelManager, registry::Registry, crypto::EcdhManager};
+use crate::{
+    admin::AdminManager,
+    auth::AuthService,
+    ban_manager::BanManager,
+    channel::ChannelManager,
+    crypto::EcdhManager,
+    registry::Registry,
+};
 
 pub struct AppState {
     pub auth: RwLock<AuthService>,
     pub channels: RwLock<ChannelManager>,
     pub registry: RwLock<Registry>,
     pub ecdh: RwLock<EcdhManager>,
+    pub admin: RwLock<AdminManager>,
+    pub bans: RwLock<BanManager>,
 
     pub special_key: String,
 
@@ -44,6 +55,8 @@ impl AppState {
             channels: RwLock::new(ChannelManager::new()),
             registry: RwLock::new(Registry::new()),
             ecdh: RwLock::new(EcdhManager::new()),
+            admin: RwLock::new(AdminManager::new()),
+            bans: RwLock::new(BanManager::new()),
             special_key,
             next_client_id: AtomicU64::new(1),
             next_server_msg_id: AtomicU64::new(1),
@@ -94,8 +107,18 @@ async fn main() {
 
     {
         let mut channels = state.channels.write().await;
-        channels.ensure_channel("general", true, None);
+        channels.ensure_channel("general", true, None, None);
     }
+
+    let ban_cleanup_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let mut bans = ban_cleanup_state.bans.write().await;
+            bans.cleanup_expired();
+        }
+    });
 
     let tls_config = tls::load_or_generate_tls_config(None, None).expect("load TLS config");
     let tls_acceptor = TlsAcceptor::from(tls_config);

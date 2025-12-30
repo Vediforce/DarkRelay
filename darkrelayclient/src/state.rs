@@ -77,4 +77,10 @@ impl ClientState {
             .cloned()
             .unwrap_or_default()
     }
+
+    pub fn remove_message(&mut self, channel: &str, message_id: u64) {
+        if let Some(messages) = self.messages_by_channel.get_mut(channel) {
+            messages.retain(|msg| msg.id != message_id);
+        }
+    }
 }

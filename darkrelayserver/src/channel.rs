@@ -8,7 +8,11 @@ use argon2::{
 };
 use chrono::Utc;
 
-use darkrelayprotocol::protocol::{ChannelId, ChannelInfo, ChatMessage, MessageId};
+use darkrelayprotocol::{
+    channel::ChannelType,
+    protocol::{ChannelId, ChannelInfo, ChatMessage, MessageId},
+    permissions::Role,
+};
 
 pub type ClientId = u64;
 
@@ -20,14 +24,17 @@ pub struct Channel {
     pub password_hash: Option<String>,
     pub messages: Vec<ChatMessage>,
     pub members: HashSet<ClientId>,
+    pub created_by: Option<ClientId>,
 }
 
 impl Channel {
-    pub fn info(&self) -> ChannelInfo {
+    pub fn info(&self, user_role: Option<Role>, channel_type: ChannelType) -> ChannelInfo {
         ChannelInfo {
             id: self.id,
             name: self.name.clone(),
             is_public: self.is_public,
+            channel_type,
+            user_role,
         }
     }
 }
@@ -48,9 +55,9 @@ impl ChannelManager {
         }
     }
 
-    pub fn ensure_channel(&mut self, name: &str, is_public: bool, password: Option<String>) {
-        if self.channels_by_name.contains_key(name) {
-            return;
+    pub fn ensure_channel(&mut self, name: &str, is_public: bool, password: Option<String>, creator: Option<ClientId>) -> ChannelId {
+        if let Some(ch) = self.channels_by_name.get(name) {
+            return ch.id;
         }
 
         let (is_public, password_hash) = match password {
@@ -58,17 +65,20 @@ impl ChannelManager {
             _ => (is_public, None),
         };
 
+        let channel_id = self.next_channel_id;
         let channel = Channel {
-            id: self.next_channel_id,
+            id: channel_id,
             name: name.to_string(),
             is_public,
             password_hash,
             messages: Vec::new(),
             members: HashSet::new(),
+            created_by: creator,
         };
 
         self.next_channel_id += 1;
         self.channels_by_name.insert(name.to_string(), channel);
+        channel_id
     }
 
     pub fn list_public(&self) -> Vec<ChannelInfo> {
@@ -76,7 +86,7 @@ impl ChannelManager {
             .channels_by_name
             .values()
             .filter(|c| c.is_public)
-            .map(|c| c.info())
+            .map(|c| c.info(None, ChannelType::Public))
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
@@ -90,7 +100,7 @@ impl ChannelManager {
     ) -> Result<ChannelInfo, String> {
         if !self.channels_by_name.contains_key(name) {
             let pw = password.clone();
-            self.ensure_channel(name, pw.is_none(), pw);
+            self.ensure_channel(name, pw.is_none(), pw, Some(client_id));
         }
 
         let channel = self
@@ -106,7 +116,7 @@ impl ChannelManager {
         }
 
         channel.members.insert(client_id);
-        Ok(channel.info())
+        Ok(channel.info(None, ChannelType::Public))
     }
 
     pub fn leave(&mut self, client_id: ClientId, name: &str) {
@@ -149,6 +159,30 @@ impl ChannelManager {
         let mut out: Vec<_> = ch.messages.iter().rev().take(limit).cloned().collect();
         out.reverse();
         out
+    }
+
+    pub fn delete_message(&mut self, channel: &str, message_id: u64) -> bool {
+        if let Some(ch) = self.channels_by_name.get_mut(channel) {
+            let len_before = ch.messages.len();
+            ch.messages.retain(|msg| msg.id != message_id);
+            ch.messages.len() < len_before
+        } else {
+            false
+        }
+    }
+
+    pub fn delete_channel(&mut self, channel: &str) -> Option<Vec<ClientId>> {
+        self.channels_by_name.remove(channel).map(|ch| {
+            ch.members.into_iter().collect()
+        })
+    }
+
+    pub fn get_channel_id(&self, name: &str) -> Option<ChannelId> {
+        self.channels_by_name.get(name).map(|ch| ch.id)
+    }
+
+    pub fn get_channel_creator(&self, name: &str) -> Option<ClientId> {
+        self.channels_by_name.get(name).and_then(|ch| ch.created_by)
     }
 }
 

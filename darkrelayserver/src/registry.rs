@@ -77,4 +77,18 @@ impl Registry {
             self.send(*id, msg.clone());
         }
     }
+
+    pub fn find_clients_by_user_id(&self, user_id: u64) -> Vec<ClientId> {
+        self.clients
+            .values()
+            .filter_map(|h| {
+                if let Some(ref user) = h.user {
+                    if user.id == user_id {
+                        return Some(h.id);
+                    }
+                }
+                None
+            })
+            .collect()
+    }
 }

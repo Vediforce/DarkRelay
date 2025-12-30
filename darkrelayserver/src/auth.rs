@@ -83,4 +83,15 @@ impl AuthService {
 
         Ok(rec.user.clone())
     }
+
+    pub fn find_user_by_username(&self, username: &str) -> Option<UserInfo> {
+        self.users_by_name.get(username).map(|rec| rec.user.clone())
+    }
+
+    pub fn get_all_users_map(&self) -> HashMap<UserId, String> {
+        self.users_by_name
+            .values()
+            .map(|rec| (rec.user.id, rec.user.username.clone()))
+            .collect()
+    }
 }

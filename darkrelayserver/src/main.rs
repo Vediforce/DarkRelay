@@ -223,7 +223,7 @@ async fn main() {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
-            let peers = reconnect_state.federation_peers.get_all_peers();
+            let peers = reconnect_state.federation_peers.get_all_peers().await;
             for peer in peers {
                 if !reconnect_state.federation_peers.is_connected(peer.server_id).await {
                     info!(server_id = peer.server_id, "attempting to reconnect to peer");

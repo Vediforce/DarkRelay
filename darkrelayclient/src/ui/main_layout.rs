@@ -294,6 +294,36 @@ fn handle_server_message(
         | ServerMessage::EcdhAck { .. } => {
             // handled earlier
         }
+        ServerMessage::DMReceived { .. } => {
+            log::warn!("DMReceived received but DM feature not yet implemented in Phase 1");
+        }
+        ServerMessage::DMHistory { .. } => {
+            log::warn!("DMHistory received but DM history not yet implemented in Phase 1");
+        }
+        ServerMessage::DMReadReceipt { .. } => {
+            log::warn!("DMReadReceipt received but not yet implemented in Phase 1");
+        }
+        ServerMessage::DMDeliveryConfirmed { .. } => {
+            log::warn!("DMDeliveryConfirmed received but not yet implemented in Phase 1");
+        }
+        ServerMessage::FileTransferProposal { .. } => {
+            log::warn!("FileTransferProposal received but file transfer not yet implemented in Phase 1");
+        }
+        ServerMessage::FileTransferAcceptanceRequired { .. } => {
+            log::warn!("FileTransferAcceptanceRequired received but file transfer not yet implemented in Phase 1");
+        }
+        ServerMessage::FileTransferChunkAck { .. } => {
+            log::warn!("FileTransferChunkAck received but file transfer not yet implemented in Phase 1");
+        }
+        ServerMessage::FileTransferStatus { .. } => {
+            log::warn!("FileTransferStatus received but file transfer not yet implemented in Phase 1");
+        }
+        ServerMessage::FileTransferReady { .. } => {
+            log::warn!("FileTransferReady received but file transfer not yet implemented in Phase 1");
+        }
+        ServerMessage::FileTransferDeliveryConfirmed { .. } => {
+            log::warn!("FileTransferDeliveryConfirmed received but file transfer not yet implemented in Phase 1");
+        }
     }
 
     Ok(())

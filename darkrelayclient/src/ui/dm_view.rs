@@ -1,9 +1,8 @@
 use ratatui::{
     backend::Backend,
-    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Span, Spans, Text},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame,
 };
 
@@ -29,7 +28,7 @@ impl DMView {
         self.scrolled_to_bottom = true;
     }
 
-    pub fn render<B: Backend>(&self, f: &mut Frame<B>, area: Rect) {
+    pub fn render(&self, f: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(5), Constraint::Length(3)].as_ref())
@@ -79,7 +78,7 @@ impl DMView {
     }
 }
 
-pub fn draw_dm_sidebar<B: Backend>(f: &mut Frame<B>, active_conversations: &[(u64, usize)], area: Rect) {
+pub fn draw_dm_sidebar(f: &mut Frame, active_conversations: &[(u64, usize)], area: Rect) {
     let items: Vec<ListItem> = active_conversations
         .iter()
         .map(|(user_id, unread_count)| {

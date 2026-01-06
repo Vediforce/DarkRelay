@@ -1,6 +1,5 @@
 use std::collections::HashMap;
-use darkrelayprotocol::protocol::{StoredDM, UserId}; 
-use chrono::Utc;
+use darkrelayprotocol::protocol::UserId;
 
 /// Represents a federated user identifier
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]

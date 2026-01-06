@@ -166,7 +166,7 @@ fn handle_command(
         ["/help"] => {
             toast(
                 terminal,
-                "Commands: /list, /join <name> [password], /create <name> [password], /quit",
+                "Commands: /list, /join, /create, /dm, /promote, /demote, /ban, /kick, /delete, /quit",
                 ToastKind::Info,
             )?;
         }
@@ -187,6 +187,103 @@ fn handle_command(
                 meta: state.next_meta(),
                 name: (*name).to_string(),
                 password: Some((*password).to_string()),
+            })?;
+        }
+        ["/dm", username, rest @ ..] => {
+            // Switch to DM view and send a message
+            let message = rest.join(" ");
+            if message.is_empty() {
+                toast(terminal, &format!("Opening DM with {}", username), ToastKind::Info)?;
+                // TODO: Switch view to DM
+            } else {
+                // Send DM - for now just show toast
+                toast(terminal, "DM feature in development - message not sent", ToastKind::Info)?;
+            }
+        }
+        ["/promote", username, role_str] => {
+            let Some(channel) = state.current_channel.clone() else {
+                toast(terminal, "Must be in a channel", ToastKind::Error)?;
+                return Ok(());
+            };
+            
+            use darkrelayprotocol::permissions::Role;
+            let role = match *role_str {
+                "admin" => Role::Admin,
+                "moderator" | "mod" => Role::Moderator,
+                _ => {
+                    toast(terminal, "Invalid role. Use: admin, moderator", ToastKind::Error)?;
+                    return Ok(());
+                }
+            };
+            
+            conn.send(ClientMessage::PromoteUser {
+                meta: state.next_meta(),
+                channel,
+                username: (*username).to_string(),
+                role,
+            })?;
+        }
+        ["/demote", username] => {
+            let Some(channel) = state.current_channel.clone() else {
+                toast(terminal, "Must be in a channel", ToastKind::Error)?;
+                return Ok(());
+            };
+            
+            conn.send(ClientMessage::DemoteUser {
+                meta: state.next_meta(),
+                channel,
+                username: (*username).to_string(),
+            })?;
+        }
+        ["/ban", username, rest @ ..] => {
+            let Some(channel) = state.current_channel.clone() else {
+                toast(terminal, "Must be in a channel", ToastKind::Error)?;
+                return Ok(());
+            };
+            
+            let reason = if rest.is_empty() { None } else { Some(rest.join(" ")) };
+            
+            conn.send(ClientMessage::BanUser {
+                meta: state.next_meta(),
+                channel,
+                username: (*username).to_string(),
+                duration_seconds: None,
+                reason,
+            })?;
+        }
+        ["/kick", username, rest @ ..] => {
+            let Some(channel) = state.current_channel.clone() else {
+                toast(terminal, "Must be in a channel", ToastKind::Error)?;
+                return Ok(());
+            };
+            
+            let reason = if rest.is_empty() { None } else { Some(rest.join(" ")) };
+            
+            conn.send(ClientMessage::KickUser {
+                meta: state.next_meta(),
+                channel,
+                username: (*username).to_string(),
+                reason,
+            })?;
+        }
+        ["/delete", message_id_str] => {
+            let Some(channel) = state.current_channel.clone() else {
+                toast(terminal, "Must be in a channel", ToastKind::Error)?;
+                return Ok(());
+            };
+            
+            let message_id: u64 = match message_id_str.parse() {
+                Ok(id) => id,
+                Err(_) => {
+                    toast(terminal, "Invalid message ID", ToastKind::Error)?;
+                    return Ok(());
+                }
+            };
+            
+            conn.send(ClientMessage::DeleteMessage {
+                meta: state.next_meta(),
+                channel,
+                message_id,
             })?;
         }
         _ => {
@@ -294,35 +391,132 @@ fn handle_server_message(
         | ServerMessage::EcdhAck { .. } => {
             // handled earlier
         }
-        ServerMessage::DMReceived { .. } => {
-            log::warn!("DMReceived received but DM feature not yet implemented in Phase 1");
+        ServerMessage::DMReceived { dm_id, sender_id, sender_server_id, sender_username, content, nonce, recipient_id, .. } => {
+            use crate::dm_handler::FederatedStoredDM;
+            use chrono::Utc;
+            
+            // Store the DM
+            let dm = FederatedStoredDM {
+                dm_id,
+                sender_id,
+                sender_server_id,
+                sender_username: sender_username.clone(),
+                recipient_id,
+                recipient_server_id: None, // We are local
+                content: content.clone(),
+                nonce: nonce.clone(),
+                timestamp: Utc::now(),
+                is_read: false,
+            };
+            
+            state.dm_conversations
+                .entry(sender_id)
+                .or_insert_with(Vec::new)
+                .push(dm);
+            
+            // Increment unread count
+            *state.unread_dms.entry(sender_id).or_insert(0) += 1;
+            
+            toast(terminal, &format!("New DM from {}", sender_username), ToastKind::Info)?;
         }
-        ServerMessage::DMHistory { .. } => {
-            log::warn!("DMHistory received but DM history not yet implemented in Phase 1");
+        ServerMessage::DMHistory { messages, .. } => {
+            use crate::dm_handler::FederatedStoredDM;
+            
+            for msg in messages {
+                let dm = FederatedStoredDM {
+                    dm_id: msg.dm_id,
+                    sender_id: msg.sender_id,
+                    sender_server_id: None, // Local server
+                    sender_username: format!("User {}", msg.sender_id),
+                    recipient_id: msg.recipient_id,
+                    recipient_server_id: None,
+                    content: msg.content.clone(),
+                    nonce: msg.nonce.clone(),
+                    timestamp: msg.timestamp,
+                    is_read: msg.is_read,
+                };
+                
+                let other_user = if dm.sender_id == state.user.as_ref().map(|u| u.id).unwrap_or(0) {
+                    dm.recipient_id
+                } else {
+                    dm.sender_id
+                };
+                
+                state.dm_conversations
+                    .entry(other_user)
+                    .or_insert_with(Vec::new)
+                    .push(dm);
+            }
+            
+            toast(terminal, "DM history loaded", ToastKind::Info)?;
         }
-        ServerMessage::DMReadReceipt { .. } => {
-            log::warn!("DMReadReceipt received but not yet implemented in Phase 1");
+        ServerMessage::DMReadReceipt { dm_id, .. } => {
+            toast(terminal, &format!("DM {} read", dm_id), ToastKind::Info)?;
         }
-        ServerMessage::DMDeliveryConfirmed { .. } => {
-            log::warn!("DMDeliveryConfirmed received but not yet implemented in Phase 1");
+        ServerMessage::DMDeliveryConfirmed { dm_id, delivered, error_message, .. } => {
+            if delivered {
+                toast(terminal, &format!("DM {} delivered", dm_id), ToastKind::Info)?;
+            } else {
+                toast(terminal, &format!("DM {} failed: {}", dm_id, error_message.unwrap_or_default()), ToastKind::Error)?;
+            }
         }
-        ServerMessage::FileTransferProposal { .. } => {
-            log::warn!("FileTransferProposal received but file transfer not yet implemented in Phase 1");
+        ServerMessage::FileTransferProposal { transfer_id, sender_id, sender_username, file_name, file_size, .. } => {
+            use crate::state::{PendingFileTransfer, FileTransferStatus};
+            
+            let transfer = PendingFileTransfer {
+                transfer_id,
+                file_name: file_name.clone(),
+                file_size,
+                sender_id: Some(sender_id),
+                sender_username: Some(sender_username.clone()),
+                is_incoming: true,
+                progress: 0,
+                status: FileTransferStatus::Pending,
+            };
+            
+            state.file_transfers.insert(transfer_id, transfer);
+            
+            toast(terminal, &format!("File transfer from {}: {} ({} bytes)", sender_username, file_name, file_size), ToastKind::Info)?;
         }
-        ServerMessage::FileTransferAcceptanceRequired { .. } => {
-            log::warn!("FileTransferAcceptanceRequired received but file transfer not yet implemented in Phase 1");
+        ServerMessage::FileTransferAcceptanceRequired { transfer_id, .. } => {
+            toast(terminal, &format!("File transfer {} waiting for acceptance", transfer_id), ToastKind::Info)?;
         }
-        ServerMessage::FileTransferChunkAck { .. } => {
-            log::warn!("FileTransferChunkAck received but file transfer not yet implemented in Phase 1");
+        ServerMessage::FileTransferChunkAck { transfer_id, chunk_index, .. } => {
+            if let Some(transfer) = state.file_transfers.get_mut(&transfer_id) {
+                // Update progress (simplified)
+                transfer.progress = chunk_index;
+            }
         }
-        ServerMessage::FileTransferStatus { .. } => {
-            log::warn!("FileTransferStatus received but file transfer not yet implemented in Phase 1");
+        ServerMessage::FileTransferStatus { transfer_id, status, progress_percent, .. } => {
+            use darkrelayprotocol::protocol::TransferStatus;
+            use crate::state::FileTransferStatus as ClientStatus;
+            
+            if let Some(transfer) = state.file_transfers.get_mut(&transfer_id) {
+                transfer.progress = progress_percent;
+                transfer.status = match status {
+                    TransferStatus::Pending => ClientStatus::Pending,
+                    TransferStatus::InProgress => ClientStatus::InProgress,
+                    TransferStatus::Completed => ClientStatus::Completed,
+                    TransferStatus::Failed => ClientStatus::Failed,
+                    TransferStatus::Declined => ClientStatus::Declined,
+                };
+                
+                if matches!(transfer.status, ClientStatus::Completed) {
+                    toast(terminal, &format!("File transfer {} completed", transfer_id), ToastKind::Info)?;
+                } else if matches!(transfer.status, ClientStatus::Failed) {
+                    toast(terminal, &format!("File transfer {} failed", transfer_id), ToastKind::Error)?;
+                }
+            }
         }
-        ServerMessage::FileTransferReady { .. } => {
-            log::warn!("FileTransferReady received but file transfer not yet implemented in Phase 1");
+        ServerMessage::FileTransferReady { transfer_id, .. } => {
+            toast(terminal, &format!("File transfer {} ready", transfer_id), ToastKind::Info)?;
         }
-        ServerMessage::FileTransferDeliveryConfirmed { .. } => {
-            log::warn!("FileTransferDeliveryConfirmed received but file transfer not yet implemented in Phase 1");
+        ServerMessage::FileTransferDeliveryConfirmed { transfer_id, delivered, error_message, .. } => {
+            if delivered {
+                toast(terminal, &format!("File transfer {} delivered", transfer_id), ToastKind::Info)?;
+            } else {
+                toast(terminal, &format!("File transfer {} failed: {}", transfer_id, error_message.unwrap_or_default()), ToastKind::Error)?;
+            }
         }
     }
 
@@ -470,19 +664,29 @@ fn draw(
     }
 
     // Info pane
-    execute!(
-        terminal.stdout(),
-        cursor::MoveTo((channels_w + messages_w + 3) as u16, 1),
-        Print(" Info ".with(Color::Grey)),
-        cursor::MoveTo((channels_w + messages_w + 3) as u16, 3),
-        Print("/help".with(Color::DarkGrey)),
-        cursor::MoveTo((channels_w + messages_w + 3) as u16, 4),
-        Print("/list".with(Color::DarkGrey)),
-        cursor::MoveTo((channels_w + messages_w + 3) as u16, 5),
-        Print("/join <name>".with(Color::DarkGrey)),
-        cursor::MoveTo((channels_w + messages_w + 3) as u16, 6),
-        Print("/quit".with(Color::DarkGrey)),
-    )?;
+    if cols_usize >= 120 {
+        execute!(
+            terminal.stdout(),
+            cursor::MoveTo((channels_w + messages_w + 3) as u16, 1),
+            Print(" Info ".with(Color::Grey)),
+            cursor::MoveTo((channels_w + messages_w + 3) as u16, 3),
+            Print("Commands:".with(Color::White)),
+            cursor::MoveTo((channels_w + messages_w + 3) as u16, 4),
+            Print("/help".with(Color::DarkGrey)),
+            cursor::MoveTo((channels_w + messages_w + 3) as u16, 5),
+            Print("/list".with(Color::DarkGrey)),
+            cursor::MoveTo((channels_w + messages_w + 3) as u16, 6),
+            Print("/join <name>".with(Color::DarkGrey)),
+            cursor::MoveTo((channels_w + messages_w + 3) as u16, 7),
+            Print("/dm <user>".with(Color::DarkGrey)),
+            cursor::MoveTo((channels_w + messages_w + 3) as u16, 8),
+            Print("/promote".with(Color::DarkGrey)),
+            cursor::MoveTo((channels_w + messages_w + 3) as u16, 9),
+            Print("/ban <user>".with(Color::DarkGrey)),
+            cursor::MoveTo((channels_w + messages_w + 3) as u16, 10),
+            Print("/quit".with(Color::DarkGrey)),
+        )?;
+    }
 
     // Input
     let input_y = rows.saturating_sub(2);

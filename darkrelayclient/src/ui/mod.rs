@@ -1,5 +1,8 @@
 pub mod auth_dialog;
 pub mod main_layout;
+pub mod responsive;
+pub mod dm_view;
+pub mod file_dialog;
 
 use std::{
     io::{self, Stdout, Write},

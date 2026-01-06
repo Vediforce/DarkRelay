@@ -2,6 +2,7 @@ mod connection;
 mod state;
 mod ui;
 mod crypto;
+mod dm_handler;
 
 use std::{
     env,

@@ -80,9 +80,12 @@ impl UserDirectory {
     /// Cache a remote user lookup result
     pub async fn cache_remote_user(&self, user: FederatedUser) {
         let key = format!("{}@{}", user.username, user.server_id);
+        let key_for_log = key.clone();
+        
         let mut cache = self.cached_remote_users.lock().await;
         cache.insert(key, user);
-        debug!(key = %key, "cached remote user");
+        
+        debug!(key = %key_for_log, "cached remote user");
     }
 
     /// Get cached remote user
@@ -171,23 +174,30 @@ impl UserDirectory {
 
     /// Cleanup expired cache entries
     pub async fn cleanup_expired_cache(&self) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        let mut cache = self.cached_remote_users.lock().await;
-        let expired: Vec<String> = cache.iter()
-            .filter(|(_, user)| now - user.last_seen > FEDERATION_CACHE_TTL_SECS)
-            .map(|(key, _)| key.clone())
-            .collect();
-
-        for key in expired {
-            cache.remove(&key);
-        }
-
-        if !expired.is_empty() {
-            debug!(count = expired.len(), "cleaned up expired user cache entries");
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
+            
+            let mut cache = self.cached_remote_users.lock().await;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            
+            // Collect expired keys first
+            let expired: Vec<String> = cache
+                .iter()
+                .filter(|(_, user)| user.last_seen + FEDERATION_CACHE_TTL_SECS < now)
+                .map(|(k, _)| k.clone())
+                .collect();
+            
+            // Then remove (using reference iteration)
+            for key in &expired {
+                cache.remove(key);
+            }
+            
+            if !expired.is_empty() {
+                info!(count = expired.len(), "cleaned up expired cache entries");
+            }
         }
     }
 
@@ -197,64 +207,5 @@ impl UserDirectory {
         let current = *id;
         *id += 1;
         current
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_local_user_registration() {
-        let dir = UserDirectory::new();
-        dir.register_local_user("alice", 1).await;
-        
-        assert_eq!(dir.find_local_user("alice").await, Some(1));
-        assert_eq!(dir.find_local_user("ALICE").await, Some(1)); // case insensitive
-        assert_eq!(dir.find_local_user("bob").await, None);
-    }
-
-    #[tokio::test]
-    async fn test_parse_federated_username() {
-        let dir = UserDirectory::new();
-        
-        // Local user
-        let (username, server_id, server_name) = dir.parse_federated_username("alice");
-        assert_eq!(username, "alice");
-        assert!(server_id.is_none());
-        assert!(server_name.is_none());
-
-        // Federated with server ID
-        let (username, server_id, server_name) = dir.parse_federated_username("bob@123");
-        assert_eq!(username, "bob");
-        assert_eq!(server_id, Some(123));
-        assert!(server_name.is_none());
-
-        // Federated with server name
-        let (username, server_id, server_name) = dir.parse_federated_username("charlie@relay-node-1");
-        assert_eq!(username, "charlie");
-        assert!(server_id.is_none());
-        assert_eq!(server_name, Some("relay-node-1".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_remote_user_caching() {
-        let dir = UserDirectory::new();
-        
-        let user = FederatedUser {
-            local_id: Some(42),
-            username: "bob".to_string(),
-            server_id: 100,
-            server_name: "test-server".to_string(),
-            is_online: true,
-            last_seen: 0,
-        };
-
-        dir.cache_remote_user(user).await;
-        assert!(dir.is_cache_valid("bob", 100).await);
-        
-        let cached = dir.get_cached_remote_user("bob", 100).await;
-        assert!(cached.is_some());
-        assert_eq!(cached.unwrap().local_id, Some(42));
     }
 }

@@ -22,11 +22,15 @@ use std::{
 
 use tokio::{
     net::TcpListener,
-    sync::{broadcast, RwLock},
+    sync::{broadcast, mpsc, RwLock},
 };
 use tokio_rustls::TlsAcceptor;
-use tracing::{error, info};
+use tracing::{error, info, warn, debug};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use darkrelayprotocol::federation::{ServerFederationMessage, ServerId};
+use tokio::io::AsyncReadExt;
+use rand::Rng;
+use bincode;
 
 use crate::{
     admin::AdminManager,
@@ -57,9 +61,9 @@ pub struct AppState {
     pub bans: RwLock<BanManager>,
     pub dm_manager: RwLock<DMManager>,
     pub file_transfer: RwLock<FileTransferManager>,
-    pub federation_peers: RwLock<PeerManager>,
-    pub federation_relay: RwLock<MessageRelay>,
-    pub federation_user_dir: RwLock<UserDirectory>,
+    pub federation_peers: Arc<PeerManager>,
+    pub federation_relay: Arc<MessageRelay>,
+    pub federation_user_dir: Arc<UserDirectory>,
 
     pub special_key: String,
     pub server_id: u64,
@@ -81,9 +85,9 @@ impl AppState {
             bans: RwLock::new(BanManager::new()),
             dm_manager: RwLock::new(DMManager::new()),
             file_transfer: RwLock::new(FileTransferManager::new()),
-            federation_peers: RwLock::new(PeerManager::new(server_id, server_name.clone())),
-            federation_relay: RwLock::new(MessageRelay::new()),
-            federation_user_dir: RwLock::new(UserDirectory::new()),
+            federation_peers: Arc::new(PeerManager::new(server_id, server_name.clone())),
+            federation_relay: Arc::new(MessageRelay::new()),
+            federation_user_dir: Arc::new(UserDirectory::new()),
             special_key,
             server_id,
             server_name,
@@ -173,7 +177,7 @@ async fn main() {
         // Assign sequential server IDs for configured peers
         let peer_server_id = server_id + (idx as u64 + 1);
         let peer_name = format!("peer-{}", idx + 1);
-        state.federation_peers.write().await.add_peer(peer_server_id, peer_addr.clone(), peer_name).await;
+        state.federation_peers.add_peer(peer_server_id, peer_addr.clone(), peer_name).await;
     }
 
     {
@@ -194,12 +198,7 @@ async fn main() {
     // Federation cache cleanup task
     let cache_cleanup_state = Arc::clone(&state);
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300)); // 5 minutes
-        loop {
-            interval.tick().await;
-            let mut user_dir = cache_cleanup_state.federation_user_dir.write().await;
-            user_dir.cleanup_expired_cache().await;
-        }
+        cache_cleanup_state.federation_user_dir.cleanup_expired_cache().await;
     });
 
     // Federation relay cleanup task
@@ -208,9 +207,14 @@ async fn main() {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(600)); // 10 minutes
         loop {
             interval.tick().await;
-            let mut relay = relay_cleanup_state.federation_relay.write().await;
-            relay.cleanup_expired().await;
+            relay_cleanup_state.federation_relay.cleanup_expired().await;
         }
+    });
+
+    // Federation relay retry task
+    let relay_retry_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        relay_retry_state.federation_relay.retry_pending_messages().await;
     });
 
     // Federation peer reconnection task
@@ -219,11 +223,11 @@ async fn main() {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
-            let peers = reconnect_state.federation_peers.read().await.get_all_peers();
+            let peers = reconnect_state.federation_peers.get_all_peers();
             for peer in peers {
-                if !reconnect_state.federation_peers.read().await.is_connected(peer.server_id) {
+                if !reconnect_state.federation_peers.is_connected(peer.server_id).await {
                     info!(server_id = peer.server_id, "attempting to reconnect to peer");
-                    if let Err(e) = reconnect_state.federation_peers.write().await.connect_to_peer(peer.server_id).await {
+                    if let Err(e) = reconnect_state.federation_peers.connect_to_peer(peer.server_id).await {
                         warn!(server_id = peer.server_id, error = %e, "reconnection failed");
                     }
                 }
@@ -245,10 +249,33 @@ async fn main() {
                 loop {
                     if let Ok((socket, peer_addr)) = listener.accept().await {
                         let fed_state = Arc::clone(&fed_state);
+                        let fed_tls_acceptor = fed_tls_acceptor.clone();
                         tokio::spawn(async move {
-                            if let Ok(tls_stream) = fed_tls_acceptor.accept(socket).await {
-                                info!(%peer_addr, "incoming federation connection");
-                                // TODO: Handle federation connection
+                            if let Ok(mut tls_stream) = fed_tls_acceptor.accept(socket).await {
+                                debug!(%peer_addr, "incoming federation connection");
+                                
+                                // Read length prefix
+                                let mut len_buf = [0u8; 4];
+                                if let Err(e) = tls_stream.read_exact(&mut len_buf).await {
+                                    debug!(%peer_addr, error = %e, "failed to read frame length");
+                                    return;
+                                }
+                                let len = u32::from_le_bytes(len_buf) as usize;
+                                
+                                // Read message
+                                let mut buf = vec![0u8; len];
+                                if let Err(e) = tls_stream.read_exact(&mut buf).await {
+                                    debug!(%peer_addr, error = %e, "failed to read frame content");
+                                    return;
+                                }
+                                
+                                if let Ok(ServerFederationMessage::ServerIntro(intro)) = bincode::deserialize(&buf) {
+                                    if let Err(e) = fed_state.federation_peers.handle_incoming_connection(tls_stream, intro).await {
+                                        warn!(%peer_addr, error = %e, "failed to handle incoming federation connection");
+                                    }
+                                } else {
+                                    warn!(%peer_addr, "first message was not ServerIntro");
+                                }
                             }
                         });
                     }
@@ -316,13 +343,13 @@ async fn main() {
 
     // Graceful shutdown - disconnect all federation peers
     info!("shutting down federation connections");
-    let peers = state.federation_peers.write().await.get_all_peers();
+    let peers = state.federation_peers.get_all_peers().await;
     for peer in peers {
-        state.federation_peers.write().await.disconnect_peer(peer.server_id).await;
+        state.federation_peers.disconnect_peer(peer.server_id).await;
     }
 
     // Clear pending relays
-    state.federation_relay.write().await.clear_all().await;
+    state.federation_relay.clear_all().await;
 
     // Wait for federation listener
     let _ = fed_listener.abort();

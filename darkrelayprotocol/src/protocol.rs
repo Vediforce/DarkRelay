@@ -77,6 +77,37 @@ pub struct LogEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TransferStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Failed,
+    Declined,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredDM {
+    pub dm_id: u64,
+    pub sender_id: u64,
+    pub recipient_id: u64,
+    pub content: Vec<u8>,
+    pub nonce: Vec<u8>,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub is_read: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileTransfer {
+    pub id: u64,
+    pub sender_id: u64,
+    pub recipient_id: u64,
+    pub file_name: String,
+    pub file_size: u64,
+    pub file_hash: Vec<u8>,
+    pub status: TransferStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
     Connect {
         meta: MessageMeta,
@@ -366,5 +397,264 @@ pub enum ServerMessage {
     AdminError {
         meta: MessageMeta,
         reason: String,
+    },
+
+    // Direct Messages
+    DMReceived {
+        meta: MessageMeta,
+        dm_id: u64,
+        sender_id: u64,
+        content: Vec<u8>,  // encrypted
+        nonce: Vec<u8>,
+        recipient_id: u64,
+    },
+    DMHistory {
+        meta: MessageMeta,
+        messages: Vec<StoredDM>,
+    },
+    DMReadReceipt {
+        meta: MessageMeta,
+        dm_id: u64,
+        read_at: u64,
+    },
+
+    // File Transfer
+    FileTransferProposal {
+        meta: MessageMeta,
+        transfer_id: u64,
+        sender_id: u64,
+        file_name: String,
+        file_size: u64,
+    },
+    FileTransferAcceptanceRequired {
+        meta: MessageMeta,
+        transfer_id: u64,
+        sender_waiting: bool,  // true = sender waiting for response
+    },
+    FileTransferReady {
+        meta: MessageMeta,
+        transfer_id: u64,
+        sender_connection_info: String,  // "ip:port"
+    },
+    FileTransferChunkAck {
+        meta: MessageMeta,
+        transfer_id: u64,
+        chunk_index: u32,
+    },
+    FileTransferStatus {
+        meta: MessageMeta,
+        transfer_id: u64,
+        status: TransferStatus,
+        progress_percent: u32,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ServerMessage {
+    AuthChallenge {
+        meta: MessageMeta,
+        message: String,
+    },
+
+    AuthSuccess {
+        meta: MessageMeta,
+        user: UserInfo,
+
+        /// Only present for registration.
+        generated_password: Option<String>,
+    },
+
+    AuthFailure {
+        meta: MessageMeta,
+        reason: String,
+    },
+
+    /// ECDH acknowledgment (Phase 2): server sends its public key.
+    EcdhAck {
+        meta: MessageMeta,
+        public_key: Vec<u8>,
+    },
+
+    ChannelList {
+        meta: MessageMeta,
+        channels: Vec<ChannelInfo>,
+    },
+
+    JoinSuccess {
+        meta: MessageMeta,
+        channel: ChannelInfo,
+    },
+
+    JoinFailure {
+        meta: MessageMeta,
+        channel: String,
+        reason: String,
+    },
+
+    MessageReceived {
+        meta: MessageMeta,
+        channel: String,
+        message: ChatMessage,
+    },
+
+    HistoryChunk {
+        meta: MessageMeta,
+        channel: String,
+        messages: Vec<ChatMessage>,
+    },
+
+    UserJoined {
+        meta: MessageMeta,
+        channel: String,
+        user: UserInfo,
+    },
+
+    UserLeft {
+        meta: MessageMeta,
+        channel: String,
+        user: UserInfo,
+    },
+
+    SystemMessage {
+        meta: MessageMeta,
+        text: String,
+    },
+
+    ProtocolError {
+        meta: MessageMeta,
+        text: String,
+    },
+
+    MessageDeleted {
+        meta: MessageMeta,
+        channel: String,
+        message_id: MessageId,
+        deleted_by: String,
+    },
+
+    UserPromoted {
+        meta: MessageMeta,
+        channel: String,
+        user_id: UserId,
+        username: String,
+        new_role: Role,
+        promoted_by: String,
+    },
+
+    UserDemoted {
+        meta: MessageMeta,
+        channel: String,
+        user_id: UserId,
+        username: String,
+        demoted_by: String,
+    },
+
+    UserBanned {
+        meta: MessageMeta,
+        channel: String,
+        user_id: UserId,
+        username: String,
+        banned_until: Option<DateTime<Utc>>,
+        banned_by: String,
+        reason: Option<String>,
+    },
+
+    UserUnbanned {
+        meta: MessageMeta,
+        channel: String,
+        username: String,
+        unbanned_by: String,
+    },
+
+    UserKicked {
+        meta: MessageMeta,
+        channel: String,
+        user_id: UserId,
+        username: String,
+        kicked_by: String,
+        reason: Option<String>,
+    },
+
+    AdminList {
+        meta: MessageMeta,
+        channel: String,
+        admins: Vec<AdminInfo>,
+    },
+
+    BanList {
+        meta: MessageMeta,
+        channel: String,
+        bans: Vec<BanInfo>,
+    },
+
+    LogList {
+        meta: MessageMeta,
+        channel: String,
+        logs: Vec<LogEntry>,
+    },
+
+    ChannelTypeChanged {
+        meta: MessageMeta,
+        channel: String,
+        new_type: ChannelType,
+        changed_by: String,
+    },
+
+    ChannelDeleted {
+        meta: MessageMeta,
+        channel: String,
+        deleted_by: String,
+    },
+
+    AdminError {
+        meta: MessageMeta,
+        reason: String,
+    },
+
+    // Direct Messages
+    SendDM {
+        meta: MessageMeta,
+        recipient_user_id: u64,
+        content: Vec<u8>,  // encrypted
+        nonce: Vec<u8>,
+    },
+    GetDMHistory {
+        meta: MessageMeta,
+        user_id: u64,
+        limit: u32,  // retrieve last N DMs
+    },
+    AckDM {
+        meta: MessageMeta,
+        dm_id: u64,  // mark as read
+    },
+
+    // File Transfer
+    FileTransferRequest {
+        meta: MessageMeta,
+        recipient_user_id: u64,
+        file_name: String,
+        file_size: u64,
+        file_hash: Vec<u8>,  // SHA256 for verification
+    },
+    FileTransferAccept {
+        meta: MessageMeta,
+        transfer_id: u64,
+        recipient_agreed: bool,  // true = accept, false = decline
+    },
+    FileTransferStart {
+        meta: MessageMeta,
+        transfer_id: u64,
+        recipient_user_id: u64,
+    },
+    FileTransferChunk {
+        meta: MessageMeta,
+        transfer_id: u64,
+        chunk_index: u32,
+        chunk_data: Vec<u8>,  // encrypted
+        chunk_hash: Vec<u8>,  // SHA256 of chunk for integrity
+    },
+    FileTransferComplete {
+        meta: MessageMeta,
+        transfer_id: u64,
     },
 }

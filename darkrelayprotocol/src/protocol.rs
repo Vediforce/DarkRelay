@@ -232,6 +232,77 @@ pub enum ClientMessage {
         channel: String,
     },
 
+    // Direct Messages
+    DMSend {
+        meta: MessageMeta,
+        recipient_id: UserId,
+        content: Vec<u8>,
+        nonce: Vec<u8>,
+    },
+
+    DMSendFederated {
+        meta: MessageMeta,
+        recipient_username: String,  // Format: "username@server_id" or "username@servername"
+        content: Vec<u8>,
+        nonce: Vec<u8>,
+    },
+
+    DMHistory {
+        meta: MessageMeta,
+        other_user_id: UserId,
+        limit: u16,
+    },
+
+    DMHistoryFederated {
+        meta: MessageMeta,
+        other_username: String,  // Format: "username@server_id"
+        limit: u16,
+    },
+
+    DMReadReceipt {
+        meta: MessageMeta,
+        dm_id: u64,
+    },
+
+    // File Transfer
+    FileTransferRequest {
+        meta: MessageMeta,
+        recipient_id: UserId,
+        file_name: String,
+        file_size: u64,
+        file_hash: Vec<u8>,
+    },
+
+    FileTransferRequestFederated {
+        meta: MessageMeta,
+        recipient_username: String,
+        file_name: String,
+        file_size: u64,
+        file_hash: Vec<u8>,
+    },
+
+    FileTransferAccept {
+        meta: MessageMeta,
+        transfer_id: u64,
+    },
+
+    FileTransferDecline {
+        meta: MessageMeta,
+        transfer_id: u64,
+    },
+
+    FileTransferChunk {
+        meta: MessageMeta,
+        transfer_id: u64,
+        chunk_index: u32,
+        chunk_data: Vec<u8>,
+    },
+
+    FileTransferCancel {
+        meta: MessageMeta,
+        transfer_id: u64,
+    },
+
     Disconnect {
         meta: MessageMeta,
     },
@@ -404,6 +475,8 @@ pub enum ServerMessage {
         meta: MessageMeta,
         dm_id: u64,
         sender_id: u64,
+        sender_server_id: Option<u64>,  // None if local, Some(id) if federated
+        sender_username: String,        // Display name with server suffix if federated
         content: Vec<u8>,  // encrypted
         nonce: Vec<u8>,
         recipient_id: u64,
@@ -417,12 +490,20 @@ pub enum ServerMessage {
         dm_id: u64,
         read_at: u64,
     },
+    DMDeliveryConfirmed {
+        meta: MessageMeta,
+        dm_id: u64,
+        delivered: bool,
+        error_message: Option<String>,
+    },
 
     // File Transfer
     FileTransferProposal {
         meta: MessageMeta,
         transfer_id: u64,
         sender_id: u64,
+        sender_server_id: Option<u64>,
+        sender_username: String,
         file_name: String,
         file_size: u64,
     },
@@ -447,214 +528,10 @@ pub enum ServerMessage {
         status: TransferStatus,
         progress_percent: u32,
     },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ServerMessage {
-    AuthChallenge {
-        meta: MessageMeta,
-        message: String,
-    },
-
-    AuthSuccess {
-        meta: MessageMeta,
-        user: UserInfo,
-
-        /// Only present for registration.
-        generated_password: Option<String>,
-    },
-
-    AuthFailure {
-        meta: MessageMeta,
-        reason: String,
-    },
-
-    /// ECDH acknowledgment (Phase 2): server sends its public key.
-    EcdhAck {
-        meta: MessageMeta,
-        public_key: Vec<u8>,
-    },
-
-    ChannelList {
-        meta: MessageMeta,
-        channels: Vec<ChannelInfo>,
-    },
-
-    JoinSuccess {
-        meta: MessageMeta,
-        channel: ChannelInfo,
-    },
-
-    JoinFailure {
-        meta: MessageMeta,
-        channel: String,
-        reason: String,
-    },
-
-    MessageReceived {
-        meta: MessageMeta,
-        channel: String,
-        message: ChatMessage,
-    },
-
-    HistoryChunk {
-        meta: MessageMeta,
-        channel: String,
-        messages: Vec<ChatMessage>,
-    },
-
-    UserJoined {
-        meta: MessageMeta,
-        channel: String,
-        user: UserInfo,
-    },
-
-    UserLeft {
-        meta: MessageMeta,
-        channel: String,
-        user: UserInfo,
-    },
-
-    SystemMessage {
-        meta: MessageMeta,
-        text: String,
-    },
-
-    ProtocolError {
-        meta: MessageMeta,
-        text: String,
-    },
-
-    MessageDeleted {
-        meta: MessageMeta,
-        channel: String,
-        message_id: MessageId,
-        deleted_by: String,
-    },
-
-    UserPromoted {
-        meta: MessageMeta,
-        channel: String,
-        user_id: UserId,
-        username: String,
-        new_role: Role,
-        promoted_by: String,
-    },
-
-    UserDemoted {
-        meta: MessageMeta,
-        channel: String,
-        user_id: UserId,
-        username: String,
-        demoted_by: String,
-    },
-
-    UserBanned {
-        meta: MessageMeta,
-        channel: String,
-        user_id: UserId,
-        username: String,
-        banned_until: Option<DateTime<Utc>>,
-        banned_by: String,
-        reason: Option<String>,
-    },
-
-    UserUnbanned {
-        meta: MessageMeta,
-        channel: String,
-        username: String,
-        unbanned_by: String,
-    },
-
-    UserKicked {
-        meta: MessageMeta,
-        channel: String,
-        user_id: UserId,
-        username: String,
-        kicked_by: String,
-        reason: Option<String>,
-    },
-
-    AdminList {
-        meta: MessageMeta,
-        channel: String,
-        admins: Vec<AdminInfo>,
-    },
-
-    BanList {
-        meta: MessageMeta,
-        channel: String,
-        bans: Vec<BanInfo>,
-    },
-
-    LogList {
-        meta: MessageMeta,
-        channel: String,
-        logs: Vec<LogEntry>,
-    },
-
-    ChannelTypeChanged {
-        meta: MessageMeta,
-        channel: String,
-        new_type: ChannelType,
-        changed_by: String,
-    },
-
-    ChannelDeleted {
-        meta: MessageMeta,
-        channel: String,
-        deleted_by: String,
-    },
-
-    AdminError {
-        meta: MessageMeta,
-        reason: String,
-    },
-
-    // Direct Messages
-    SendDM {
-        meta: MessageMeta,
-        recipient_user_id: u64,
-        content: Vec<u8>,  // encrypted
-        nonce: Vec<u8>,
-    },
-    GetDMHistory {
-        meta: MessageMeta,
-        user_id: u64,
-        limit: u32,  // retrieve last N DMs
-    },
-    AckDM {
-        meta: MessageMeta,
-        dm_id: u64,  // mark as read
-    },
-
-    // File Transfer
-    FileTransferRequest {
-        meta: MessageMeta,
-        recipient_user_id: u64,
-        file_name: String,
-        file_size: u64,
-        file_hash: Vec<u8>,  // SHA256 for verification
-    },
-    FileTransferAccept {
+    FileTransferDeliveryConfirmed {
         meta: MessageMeta,
         transfer_id: u64,
-        recipient_agreed: bool,  // true = accept, false = decline
-    },
-    FileTransferStart {
-        meta: MessageMeta,
-        transfer_id: u64,
-        recipient_user_id: u64,
-    },
-    FileTransferChunk {
-        meta: MessageMeta,
-        transfer_id: u64,
-        chunk_index: u32,
-        chunk_data: Vec<u8>,  // encrypted
-        chunk_hash: Vec<u8>,  // SHA256 of chunk for integrity
-    },
-    FileTransferComplete {
-        meta: MessageMeta,
-        transfer_id: u64,
+        delivered: bool,
+        error_message: Option<String>,
     },
 }

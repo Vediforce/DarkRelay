@@ -7,6 +7,7 @@ use std::{
 use bincode;
 use chrono::Utc;
 use darkrelayprotocol::{
+    federation::ServerFederationMessage,
     permissions::Permission,
     protocol::{
         ChatMessage, ClientMessage, MessageMeta, ServerMessage,
@@ -463,6 +464,53 @@ pub async fn handle_client(
 
                     ClientMessage::DeleteChannel { channel, .. } => {
                         handle_delete_channel(&state, client_id, user_authed, &channel).await;
+                    }
+
+                    // DM Handling
+                    ClientMessage::DMSend { recipient_id, content, nonce, .. } => {
+                        handle_dm_send(&state, client_id, user_authed, recipient_id, content, nonce).await;
+                    }
+
+                    ClientMessage::DMSendFederated { recipient_username, content, nonce, .. } => {
+                        handle_dm_send_federated(&state, client_id, user_authed, recipient_username, content, nonce).await;
+                    }
+
+                    ClientMessage::DMHistory { other_user_id, limit, .. } => {
+                        handle_dm_history(&state, client_id, user_authed, other_user_id, limit).await;
+                    }
+
+                    ClientMessage::DMHistoryFederated { other_username, limit, .. } => {
+                        // For now, treat as local - federation history is a Phase 5+ feature
+                        handle_dm_history(&state, client_id, user_authed, 0, limit).await;
+                    }
+
+                    ClientMessage::DMReadReceipt { dm_id, .. } => {
+                        handle_dm_read_receipt(&state, client_id, user_authed, dm_id).await;
+                    }
+
+                    // File Transfer Handling
+                    ClientMessage::FileTransferRequest { recipient_id, file_name, file_size, file_hash, .. } => {
+                        handle_file_transfer_request(&state, client_id, user_authed, recipient_id, file_name, file_size, file_hash).await;
+                    }
+
+                    ClientMessage::FileTransferRequestFederated { recipient_username, file_name, file_size, file_hash, .. } => {
+                        handle_file_transfer_request_federated(&state, client_id, user_authed, recipient_username, file_name, file_size, file_hash).await;
+                    }
+
+                    ClientMessage::FileTransferAccept { transfer_id, .. } => {
+                        handle_file_transfer_accept(&state, client_id, user_authed, transfer_id).await;
+                    }
+
+                    ClientMessage::FileTransferDecline { transfer_id, .. } => {
+                        handle_file_transfer_decline(&state, client_id, user_authed, transfer_id).await;
+                    }
+
+                    ClientMessage::FileTransferChunk { transfer_id, chunk_index, chunk_data, .. } => {
+                        handle_file_transfer_chunk(&state, client_id, user_authed, transfer_id, chunk_index, chunk_data).await;
+                    }
+
+                    ClientMessage::FileTransferCancel { transfer_id, .. } => {
+                        handle_file_transfer_cancel(&state, client_id, user_authed, transfer_id).await;
                     }
 
                     ClientMessage::Disconnect{..} => {
@@ -1462,4 +1510,532 @@ async fn write_frame<T: Serialize, W: AsyncWrite + Unpin>(writer: &mut W, msg: &
     writer.write_all(&data).await?;
     writer.flush().await?;
     Ok(())
+}
+
+// DM Handling Functions
+
+async fn handle_dm_send(
+    state: &Arc<AppState>,
+    client_id: ClientId,
+    user_authed: bool,
+    recipient_id: u64,
+    content: Vec<u8>,
+    nonce: Vec<u8>,
+) {
+    if !user_authed {
+        send_protocol_error(state, client_id, "login/register required").await;
+        return;
+    }
+
+    let sender = {
+        let reg = state.registry.read().await;
+        reg.user(client_id)
+    };
+
+    let Some(sender) = sender else {
+        send_protocol_error(state, client_id, "user not found").await;
+        return;
+    };
+
+    // Store DM
+    let (dm_id, timestamp) = {
+        let mut dm_manager = state.dm_manager.write().await;
+        dm_manager.store_dm(sender.id, recipient_id, content.clone(), nonce.clone()).await
+    };
+
+    // Deliver to recipient if online
+    let recipient_clients = {
+        let reg = state.registry.read().await;
+        reg.find_clients_by_user_id(recipient_id)
+    };
+
+    for recipient_client_id in recipient_clients {
+        let dm_msg = ServerMessage::DMReceived {
+            meta: server_meta(state),
+            dm_id,
+            sender_id: sender.id,
+            sender_server_id: None,
+            sender_username: sender.username.clone(),
+            content: content.clone(),
+            nonce: nonce.clone(),
+            recipient_id,
+        };
+
+        let reg = state.registry.read().await;
+        reg.send(recipient_client_id, dm_msg);
+    }
+
+    debug!(client_id, recipient_id, dm_id, "DM sent");
+}
+
+async fn handle_dm_send_federated(
+    state: &Arc<AppState>,
+    client_id: ClientId,
+    user_authed: bool,
+    recipient_username: String,
+    content: Vec<u8>,
+    nonce: Vec<u8>,
+) {
+    if !user_authed {
+        send_protocol_error(state, client_id, "login/register required").await;
+        return;
+    }
+
+    let sender = {
+        let reg = state.registry.read().await;
+        reg.user(client_id)
+    };
+
+    let Some(sender) = sender else {
+        send_protocol_error(state, client_id, "user not found").await;
+        return;
+    };
+
+    // Parse the federated username
+    let user_dir = state.federation_user_dir.read().await;
+    let (username, server_id, server_name) = user_dir.parse_federated_username(&recipient_username);
+    
+    if server_id.is_none() && server_name.is_none() {
+        // No server specified, try to find locally
+        drop(user_dir);
+        handle_dm_send(state, client_id, user_authed, 0, content, nonce).await;
+        return;
+    }
+
+    let target_server_id = server_id.unwrap_or(0);
+    let target_server_name = server_name.unwrap_or_default();
+
+    // Check if we have a cached lookup
+    if let Some(server_id) = server_id {
+        if user_dir.is_cache_valid(&username, server_id).await {
+            // We have cached info, try to relay
+            let cached = user_dir.get_cached_remote_user(&username, server_id).await;
+            if let Some(user) = cached {
+                if user.local_id.is_some() {
+                    // User exists locally but with different server ID - inconsistency
+                    send_protocol_error(state, client_id, "user found locally but with different server ID").await;
+                    return;
+                }
+            }
+        }
+    }
+
+    // Create relay message
+    let dm_id = state.next_server_msg_id();
+
+    // Queue for relay
+    {
+        let mut relay = state.federation_relay.write().await;
+        let _ = relay.queue_dm_for_relay(
+            target_server_id,
+            dm_id,
+            state.server_id,
+            content,
+            nonce,
+        ).await;
+    }
+
+    // Send to peer if connected
+    if state.federation_peers.read().await.is_connected(target_server_id) {
+        let relay_msg = darkrelayprotocol::federation::ServerFederationMessage::RelayDM(
+            darkrelayprotocol::federation::RelayDM {
+                dm_id,
+                sender_id: sender.id,
+                sender_server_id: state.server_id,
+                recipient_username: username,
+                content,
+                nonce,
+                timestamp: chrono::Utc::now().timestamp() as u64,
+                hop_count: 0,
+            }
+        );
+
+        if let Err(e) = state.federation_peers.write().await.send_to_peer(target_server_id, &relay_msg).await {
+            warn!(server_id = target_server_id, error = %e, "failed to send relay DM");
+        }
+    } else {
+        // Queue for later delivery
+        warn!(server_id = target_server_id, "peer not connected, DM queued for later");
+    }
+
+    // Confirm to sender
+    let confirm = ServerMessage::DMDeliveryConfirmed {
+        meta: server_meta(state),
+        dm_id,
+        delivered: false,
+        error_message: Some("queued for delivery".to_string()),
+    };
+
+    let reg = state.registry.read().await;
+    reg.send(client_id, confirm);
+
+    debug!(client_id, %recipient_username, dm_id, "federated DM queued");
+}
+
+async fn handle_dm_history(
+    state: &Arc<AppState>,
+    client_id: ClientId,
+    user_authed: bool,
+    other_user_id: u64,
+    limit: u16,
+) {
+    if !user_authed {
+        send_protocol_error(state, client_id, "login/register required").await;
+        return;
+    }
+
+    let sender = {
+        let reg = state.registry.read().await;
+        reg.user(client_id)
+    };
+
+    let Some(sender) = sender else {
+        send_protocol_error(state, client_id, "user not found").await;
+        return;
+    };
+
+    let history = {
+        let dm_manager = state.dm_manager.read().await;
+        dm_manager.get_history_for_user(sender.id, other_user_id, limit as u32).await
+    };
+
+    let msg = ServerMessage::DMHistory {
+        meta: server_meta(state),
+        messages: history,
+    };
+
+    let reg = state.registry.read().await;
+    reg.send(client_id, msg);
+}
+
+async fn handle_dm_read_receipt(
+    state: &Arc<AppState>,
+    client_id: ClientId,
+    user_authed: bool,
+    dm_id: u64,
+) {
+    if !user_authed {
+        return;
+    }
+
+    let sender = {
+        let reg = state.registry.read().await;
+        reg.user(client_id)
+    };
+
+    let Some(user) = sender else {
+        return;
+    };
+
+    let mut dm_manager = state.dm_manager.write().await;
+    dm_manager.mark_dm_as_read(dm_id, user.id).await;
+}
+
+async fn handle_file_transfer_request(
+    state: &Arc<AppState>,
+    client_id: ClientId,
+    user_authed: bool,
+    recipient_id: u64,
+    file_name: String,
+    file_size: u64,
+    file_hash: Vec<u8>,
+) {
+    if !user_authed {
+        send_protocol_error(state, client_id, "login/register required").await;
+        return;
+    }
+
+    let sender = {
+        let reg = state.registry.read().await;
+        reg.user(client_id)
+    };
+
+    let Some(sender) = sender else {
+        send_protocol_error(state, client_id, "user not found").await;
+        return;
+    };
+
+    let transfer_id = {
+        let mut ft_manager = state.file_transfer.write().await;
+        ft_manager.create_transfer(sender.id, recipient_id, file_name.clone(), file_size, file_hash.clone()).await
+    };
+
+    // Create file transfer proposal for recipient
+    let proposal = ServerMessage::FileTransferProposal {
+        meta: server_meta(state),
+        transfer_id,
+        sender_id: sender.id,
+        sender_server_id: None,
+        sender_username: sender.username.clone(),
+        file_name,
+        file_size,
+    };
+
+    // Send to all client instances of the recipient
+    let recipient_clients = {
+        let reg = state.registry.read().await;
+        reg.find_clients_by_user_id(recipient_id)
+    };
+
+    for recipient_client_id in recipient_clients {
+        let reg = state.registry.read().await;
+        reg.send(recipient_client_id, proposal.clone());
+    }
+
+    debug!(client_id, recipient_id, transfer_id, "file transfer request sent");
+}
+
+async fn handle_file_transfer_request_federated(
+    state: &Arc<AppState>,
+    client_id: ClientId,
+    user_authed: bool,
+    recipient_username: String,
+    file_name: String,
+    file_size: u64,
+    file_hash: Vec<u8>,
+) {
+    if !user_authed {
+        send_protocol_error(state, client_id, "login/register required").await;
+        return;
+    }
+
+    let sender = {
+        let reg = state.registry.read().await;
+        reg.user(client_id)
+    };
+
+    let Some(sender) = sender else {
+        send_protocol_error(state, client_id, "user not found").await;
+        return;
+    };
+
+    // Parse federated username
+    let user_dir = state.federation_user_dir.read().await;
+    let (username, server_id, _server_name) = user_dir.parse_federated_username(&recipient_username);
+    
+    let Some(target_server_id) = server_id else {
+        send_protocol_error(state, client_id, "invalid federated username format").await;
+        return;
+    };
+
+    let transfer_id = state.next_server_msg_id();
+
+    // Create file transfer request for relay
+    let request = darkrelayprotocol::federation::RelayFileTransferRequest {
+        transfer_id,
+        sender_id: sender.id,
+        sender_server_id: state.server_id,
+        recipient_username: username,
+        file_name,
+        file_size,
+        file_hash,
+        hop_count: 0,
+    };
+
+    // Queue for relay
+    {
+        let mut relay = state.federation_relay.write().await;
+        relay.queue_file_transfer_request(
+            target_server_id,
+            transfer_id,
+            sender.id,
+            state.server_id,
+            username,
+            file_name.clone(),
+            file_size,
+            file_hash,
+        ).await;
+    }
+
+    // Send to peer if connected
+    if state.federation_peers.read().await.is_connected(target_server_id) {
+        let relay_msg = darkrelayprotocol::federation::ServerFederationMessage::RelayFileTransferRequest(request);
+
+        if let Err(e) = state.federation_peers.write().await.send_to_peer(target_server_id, &relay_msg).await {
+            warn!(server_id = target_server_id, error = %e, "failed to send file transfer request");
+        }
+    }
+
+    debug!(client_id, %recipient_username, transfer_id, "federated file transfer requested");
+}
+
+async fn handle_file_transfer_accept(
+    state: &Arc<AppState>,
+    client_id: ClientId,
+    user_authed: bool,
+    transfer_id: u64,
+) {
+    if !user_authed {
+        send_protocol_error(state, client_id, "login/register required").await;
+        return;
+    }
+
+    let sender = {
+        let reg = state.registry.read().await;
+        reg.user(client_id)
+    };
+
+    let Some(user) = sender else {
+        return;
+    };
+
+    let transfer = {
+        let ft_manager = state.file_transfer.read().await;
+        ft_manager.get_transfer(transfer_id).await
+    };
+
+    if let Some(transfer) = transfer {
+        if transfer.recipient_id != user.id {
+            return;
+        }
+
+        let mut ft_manager = state.file_transfer.write().await;
+        ft_manager.accept_transfer(transfer_id).await;
+
+        // Notify sender
+        let status_msg = ServerMessage::FileTransferStatus {
+            meta: server_meta(state),
+            transfer_id,
+            status: darkrelayprotocol::protocol::TransferStatus::InProgress,
+            progress_percent: 0,
+        };
+
+        let sender_clients = {
+            let reg = state.registry.read().await;
+            reg.find_clients_by_user_id(transfer.sender_id)
+        };
+
+        for sender_client_id in sender_clients {
+            let reg = state.registry.read().await;
+            reg.send(sender_client_id, status_msg.clone());
+        }
+    }
+}
+
+async fn handle_file_transfer_decline(
+    state: &Arc<AppState>,
+    client_id: ClientId,
+    user_authed: bool,
+    transfer_id: u64,
+) {
+    if !user_authed {
+        return;
+    }
+
+    let sender = {
+        let reg = state.registry.read().await;
+        reg.user(client_id)
+    };
+
+    let Some(user) = sender else {
+        return;
+    };
+
+    let transfer = {
+        let ft_manager = state.file_transfer.read().await;
+        ft_manager.get_transfer(transfer_id).await
+    };
+
+    if let Some(transfer) = transfer {
+        if transfer.recipient_id != user.id {
+            return;
+        }
+
+        let mut ft_manager = state.file_transfer.write().await;
+        ft_manager.decline_transfer(transfer_id).await;
+    }
+}
+
+async fn handle_file_transfer_chunk(
+    state: &Arc<AppState>,
+    client_id: ClientId,
+    user_authed: bool,
+    transfer_id: u64,
+    chunk_index: u32,
+    chunk_data: Vec<u8>,
+) {
+    if !user_authed {
+        return;
+    }
+
+    let sender = {
+        let reg = state.registry.read().await;
+        reg.user(client_id)
+    };
+
+    let Some(user) = sender else {
+        return;
+    };
+
+    let transfer = {
+        let ft_manager = state.file_transfer.read().await;
+        ft_manager.get_transfer(transfer_id).await
+    };
+
+    if let Some(transfer) = transfer {
+        if transfer.sender_id != user.id {
+            return;
+        }
+
+        // Store chunk
+        let mut ft_manager = state.file_transfer.write().await;
+        ft_manager.add_chunk(transfer_id, chunk_index, chunk_data.clone(), Vec::new()).await;
+
+        // Calculate progress
+        let (status, progress) = {
+            let ft_manager = state.file_transfer.read().await;
+            ft_manager.get_progress(transfer_id).await.unwrap_or((darkrelayprotocol::protocol::TransferStatus::InProgress, 0))
+        };
+
+        // Send ACK to sender
+        let ack = ServerMessage::FileTransferChunkAck {
+            meta: server_meta(state),
+            transfer_id,
+            chunk_index,
+        };
+
+        let reg = state.registry.read().await;
+        reg.send(client_id, ack);
+
+        // Send progress update
+        let progress_msg = ServerMessage::FileTransferStatus {
+            meta: server_meta(state),
+            transfer_id,
+            status,
+            progress_percent: progress,
+        };
+
+        let reg = state.registry.read().await;
+        reg.send(client_id, progress_msg);
+    }
+}
+
+async fn handle_file_transfer_cancel(
+    state: &Arc<AppState>,
+    client_id: ClientId,
+    user_authed: bool,
+    transfer_id: u64,
+) {
+    if !user_authed {
+        return;
+    }
+
+    let sender = {
+        let reg = state.registry.read().await;
+        reg.user(client_id)
+    };
+
+    let Some(user) = sender else {
+        return;
+    };
+
+    let transfer = {
+        let ft_manager = state.file_transfer.read().await;
+        ft_manager.get_transfer(transfer_id).await
+    };
+
+    if let Some(transfer) = transfer {
+        let mut ft_manager = state.file_transfer.write().await;
+        ft_manager.fail_transfer(transfer_id).await;
+    }
 }

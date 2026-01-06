@@ -113,7 +113,7 @@ pub fn clear(terminal: &mut TerminalSession) -> io::Result<()> {
 pub fn show_error_dialog(terminal: &mut TerminalSession, text: &str) -> io::Result<()> {
     clear(terminal)?;
 
-    let (cols, rows) = terminal::size()?;
+    let (_cols, rows) = terminal::size()?;
     let y = rows / 2;
 
     execute!(terminal.stdout, cursor::MoveTo(2, y), Print(text.with(Color::Red)))?;

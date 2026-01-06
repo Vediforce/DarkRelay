@@ -1592,12 +1592,11 @@ async fn handle_dm_send_federated(
     };
 
     // Parse the federated username
-    let user_dir = state.federation_user_dir.read().await;
+    let user_dir = &state.federation_user_dir;
     let (username, server_id, server_name) = user_dir.parse_federated_username(&recipient_username);
     
     if server_id.is_none() && server_name.is_none() {
         // No server specified, try to find locally
-        drop(user_dir);
         handle_dm_send(state, client_id, user_authed, 0, content, nonce).await;
         return;
     }
@@ -1625,7 +1624,7 @@ async fn handle_dm_send_federated(
 
     // Queue for relay
     {
-        let mut relay = state.federation_relay.write().await;
+        let relay = &state.federation_relay;
         let _ = relay.queue_dm_for_relay(
             target_server_id,
             dm_id,
@@ -1636,7 +1635,7 @@ async fn handle_dm_send_federated(
     }
 
     // Send to peer if connected
-    if state.federation_peers.read().await.is_connected(target_server_id) {
+    if state.federation_peers.is_connected(target_server_id).await {
         let relay_msg = darkrelayprotocol::federation::ServerFederationMessage::RelayDM(
             darkrelayprotocol::federation::RelayDM {
                 dm_id,
@@ -1650,7 +1649,7 @@ async fn handle_dm_send_federated(
             }
         );
 
-        if let Err(e) = state.federation_peers.write().await.send_to_peer(target_server_id, &relay_msg).await {
+        if let Err(e) = state.federation_peers.send_to_peer(target_server_id, &relay_msg).await {
             warn!(server_id = target_server_id, error = %e, "failed to send relay DM");
         }
     } else {
@@ -1810,7 +1809,7 @@ async fn handle_file_transfer_request_federated(
     };
 
     // Parse federated username
-    let user_dir = state.federation_user_dir.read().await;
+    let user_dir = &state.federation_user_dir;
     let (username, server_id, _server_name) = user_dir.parse_federated_username(&recipient_username);
     
     let Some(target_server_id) = server_id else {
@@ -1825,16 +1824,16 @@ async fn handle_file_transfer_request_federated(
         transfer_id,
         sender_id: sender.id,
         sender_server_id: state.server_id,
-        recipient_username: username,
-        file_name,
+        recipient_username: username.clone(),
+        file_name: file_name.clone(),
         file_size,
-        file_hash,
+        file_hash: file_hash.clone(),
         hop_count: 0,
     };
 
     // Queue for relay
     {
-        let mut relay = state.federation_relay.write().await;
+        let relay = &state.federation_relay;
         relay.queue_file_transfer_request(
             target_server_id,
             transfer_id,
@@ -1848,10 +1847,10 @@ async fn handle_file_transfer_request_federated(
     }
 
     // Send to peer if connected
-    if state.federation_peers.read().await.is_connected(target_server_id) {
+    if state.federation_peers.is_connected(target_server_id).await {
         let relay_msg = darkrelayprotocol::federation::ServerFederationMessage::RelayFileTransferRequest(request);
 
-        if let Err(e) = state.federation_peers.write().await.send_to_peer(target_server_id, &relay_msg).await {
+        if let Err(e) = state.federation_peers.send_to_peer(target_server_id, &relay_msg).await {
             warn!(server_id = target_server_id, error = %e, "failed to send file transfer request");
         }
     }
